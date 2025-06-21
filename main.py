@@ -58,29 +58,29 @@ def parse_args():
     )
     group = parser.add_mutually_exclusive_group(required=True)
     parser.add_argument('-h', '--help', help='显示此帮助信息并退出', action='help')
-    group.add_argument('-p', '--parameter', action='store_true', help='参数列表')
+    group.add_argument('-m', '--parameter', action='store_true', help='参数列表')
     parser.add_argument('-y', '--yes', action='store_true', help='自动确认, 无需提示')
     parser.add_argument('-d', '--detail', action='store_true', help=f'{Fore.RED}请求漫画详情页(确保数据完整){Fore.RESET}')
     parser.add_argument('-b', '--bonus', action='store_true', help=f'{Fore.RED}保存特典信息{Fore.RESET}')
+    parser.add_argument('-f', '--fill_blank', action='store_true', help=f'{Fore.RED}仅请求未获取数据{Fore.RESET}')
     group.add_argument('-t', '--type', help='获取不同分类页面的漫画数据，详情参考参数列表')
     group.add_argument('-i', '--id', help='输入一个或多个ID, 使用空格或逗号分隔', type=parser.id_list)
     parser.add_argument('-s', '--style', help='分类页中选择风格，详情参考参数列表', type=int, default=-1)
     parser.add_argument('-a', '--area', help='分类页中选择地区，详情参考参数列表', type=int, default=-1)
     parser.add_argument('-u', '--status', help='分类页中选择状态，详情参考参数列表', type=int, default=-1)
     parser.add_argument('-o', '--order', help='分类页中选择排序方式，详情参考参数列表', type=int, default=0)
-    parser.add_argument('-c', '--price', help='分类页中选择收费方式，详情参考参数列表', type=int, default=-1)
+    parser.add_argument('-p', '--price', help='分类页中选择收费方式，详情参考参数列表', type=int, default=-1)
     parser.add_argument('-e', '--special', help='分类页中选择特殊分类，详情参考参数列表', type=int, default=0)
     parser.add_argument('-r', '--rank', help='排行页中选择排行类型，详情参考参数列表', type=int, default=0)
     parser.add_argument('--sdate', help='更新推荐页中选择开始日期', default=time.strftime("%Y-%m-%d", time.localtime()))
     parser.add_argument('--edate', help='更新推荐页中选择结束日期', default=time.strftime("%Y-%m-%d", time.localtime()))
     group.add_argument('-I', '--input', help='指定读取数据的文件, 支持json、csv、xlsx')
     parser.add_argument('-O', '--output', help='指定输出文件名以及格式, 支持json、csv、xlsx', default="metadata.json")
-    parser.add_argument('-w', '--workers', help='并发线程数量', type=int, default=4)
+    parser.add_argument('-w', '--workers', help='并发线程数量', type=int, default=1)
     parser.add_argument('-D', '--delay', help='如果是单线程作业, 每个请求间隔(单位: 毫秒)', type=int, default=0)
     parser.add_argument('-H', '--headers', help='请求头文件(json格式), 可包含Cookie')
-    parser.add_argument('-S', '--page_size', help='指定多页请求每页数量', type=int, default=100)
+    parser.add_argument('-S', '--page_size', help='指定多页请求每页数量', type=int, default=50)
     parser.add_argument('-P', '--page_num', help='指定第几页', type=int)
-
 
     args = parser.parse_args()
     if (datetime.strptime(args.edate, "%Y-%m-%d") - datetime.strptime(args.sdate, "%Y-%m-%d")).days < 0:
@@ -95,6 +95,7 @@ class Crawler:
     def __init__(self, args: argparse.Namespace):
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self.args = args
+        self.args.is_risk = False
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
             "Cookie": f"buvid3={uuid.uuid4()}infoc;"
@@ -119,8 +120,10 @@ class Crawler:
 
         analyze_type = self.req_type.get(self.args.type)
         prompt = f"您选择了[{analyze_type}]"
-        if self.args.id:
+        if self.args.id and not self.args.input:
             prompt = f"您选择了{len(self.args.id)}本漫画, 请求漫画详情速度({self.args.workers}线程{f", 间隔{self.args.delay}毫秒" if self.args.delay else ""})"
+        elif self.args.input:
+            prompt = f"您输入的文件内包含了{len(self.args.id)}本漫画"
         elif self.args.type == "ranking":
             prompt += f", 排行榜为[{self.ranking_dict.get(self.args.rank, self.args.rank)}]"
         elif self.args.type == "classify":
@@ -130,10 +133,17 @@ class Crawler:
             prompt += f", 日期为[{self.args.sdate}至{self.args.edate}]共{delta}天"
         elif self.args.type == "home_feed":
             prompt += f", 每页{self.args.page_size}本漫画(注意: 信息流加载大于200本/页可能会造成重复){f", 指定第{self.args.page_num}页" if self.args.page_num else ""}"
+
         if self.args.detail:
-            prompt += ", 以及请求漫画详情页"
+            if self.args.fill_blank:
+                prompt += ", 仅请求其中尚未爬取的漫画详情页"
+            else:
+                prompt += ", 请求漫画详情页"
         if self.args.bonus:
-            prompt += ", 同时请求漫画特典"
+            if self.args.fill_blank:
+                prompt += ", 仅请求其中尚未爬取的漫画特典"
+            else:
+                prompt += ", 请求漫画特典"
         if self.args.bonus or self.args.detail:
             prompt += f", 请求速度为({self.args.workers}线程{f", 间隔{self.args.delay}毫秒" if self.args.delay else ""})"
         if self.args.output:
@@ -224,7 +234,9 @@ class Crawler:
 
     def get_classify_page(self, style=-1, area=-1, status=-1, order=0, special=0, price=-1, page_num=1, page_size=100) -> dict:
         """获取分类页结果"""
-        url = "https://manga.bilibili.com/twirp/comic.v1.Comic/ClassPage?device=h5&platform=web"
+        if self.args.is_risk:
+            return
+        url = "https://manga.bilibili.com/twirp/comic.v1.Comic/ClassPage?mobi_app=android_comic&device=android&platform=android"
         payload = {
             "style_id": style,
             "area_id": area,
@@ -237,11 +249,20 @@ class Crawler:
         }
         try:
             response = self.post(url, headers=self.headers, data=payload, timeout=5)
+            if response.status_code == 412:
+                self.args.is_risk = True
+                return
             response.raise_for_status()
-            data = response.json().get("data", {})
-            for i in data:
-                i["comic_id"] = i.get("season_id")
-            return data
+            comics = response.json().get("data", {})
+            for comic in comics:
+                comic["comic_id"] = comic.get("season_id")
+                if comic.get("is_free") == 0:
+                    comic["price"] = "免费"
+                elif comic.get("is_free") == 1:
+                    comic["price"] = "付费(可漫读券)"
+                elif comic.get("is_free") == 2:
+                    comic["price"] = "付费"
+            return comics
         except requests.exceptions.HTTPError as e:
             raise RuntimeError(f"请求错误 {e}") from e
         except requests.RequestException as e:
@@ -251,6 +272,8 @@ class Crawler:
 
     def get_update_page(self, date: str, page_num=1, page_size=100) -> dict:
         """获取推荐页结果"""
+        if self.args.is_risk:
+            return
         url = "https://manga.bilibili.com/twirp/comic.v1.Comic/GetDailyPush"
         payload = {
             "date": date,
@@ -259,6 +282,9 @@ class Crawler:
         }
         try:
             response = self.post(url, headers=self.headers, data=payload, timeout=5)
+            if response.status_code == 412:
+                self.args.is_risk = True
+                return
             response.raise_for_status()
             data = response.json().get("data", {})
             comics = data.get("list")
@@ -293,21 +319,33 @@ class Crawler:
 
     def get_comic_details(self, comic_id: str) -> dict:
         """获取漫画详情页"""
+        if self.args.is_risk:
+            return
         url = "https://manga.bilibili.com/twirp/comic.v1.Comic/ComicDetail?device=h5&platform=web"
         try:
             response = self.post(url, headers=self.headers, data={"comic_id": comic_id}, timeout=5)
+            if response.status_code == 412:
+                self.args.is_risk = True
+                return
             response.raise_for_status()
             comic = response.json().get("data", {})
             comic["comic_id"] = comic.get("id")
-            last_episode = comic.get("ep_list")[0]
-            comic["last_ep_id"] = last_episode["id"]
-            comic["last_ep_cover"] = last_episode["cover"]
-            comic["last_ep_title"] = f"{last_episode["short_title"]} {last_episode["title"]}"
-            comic["last_ep_date"] = last_episode["pub_time"].split(" ")[0]
-            if comic["release_time"] == "":
-                comic["release_time"] = comic.get("ep_list")[-1]["pub_time"].split(" ")[0]
-            else:
-                comic["release_time"] = comic["release_time"].replace(".","-")
+            if comic.get("pay_mode") == 0:
+                comic["price"] = "免费"
+            elif comic.get("pay_mode") == 1:
+                comic["price"] = "付费(可漫读券)"
+            elif comic.get("pay_mode") == 2:
+                comic["price"] = "付费"
+            if comic.get("ep_list"):
+                last_episode = comic.get("ep_list")[0]
+                comic["last_ep_id"] = last_episode["id"]
+                comic["last_ep_cover"] = last_episode["cover"]
+                comic["last_ep_title"] = f"{last_episode["short_title"]} {last_episode["title"]}"
+                comic["last_ep_date"] = last_episode["pub_time"].split(" ")[0]
+                if comic["release_time"] == "":
+                    comic["release_time"] = comic.get("ep_list")[-1]["pub_time"].split(" ")[0]
+                else:
+                    comic["release_time"] = comic["release_time"].replace(".","-")
             return comic
         except requests.exceptions.HTTPError as e:
             raise RuntimeError(f"请求错误 {e}") from e
@@ -318,11 +356,14 @@ class Crawler:
 
     def get_comic_bonus(self, comic_id: str) -> dict:
         """获取漫画特典页"""
-        if comic_id is None:
+        if comic_id is None or self.args.is_risk:
             return
-        url = "https://manga.bilibili.com/twirp/comic.v1.Comic/GetComicAlbumPlus?mobi_app=android_comic&device=android&platform=android&version=5.21.0"
+        url = "https://manga.bilibili.com/twirp/comic.v1.Comic/GetComicAlbumPlus?mobi_app=android_comic&device=android&platform=android&version=6.17.1"
         try:
             response = self.post(url, headers=self.headers, data={"comic_id": comic_id}, timeout=5)
+            if response.status_code == 412:
+                self.args.is_risk = True
+                return
             response.raise_for_status()
             data = response.json().get("data", {}).get("list", {})
             return [comic_id, data]
@@ -335,6 +376,8 @@ class Crawler:
 
     def get_home_feeds(self, buvid=None, page_num=1, page_size=100) -> dict:
         """获取主页信息流结果"""
+        if self.args.is_risk:
+            return
         url = "https://manga.bilibili.com/twirp/comic.v1.Home/HomeFeed"
         if buvid is None:
             mac = ':'.join(''.join(random.choices('0123456789ABCDEF', k=2)) for _ in range(6))
@@ -347,6 +390,9 @@ class Crawler:
         }
         try:
             response = self.post(url, headers=self.headers, data=payload, timeout=5)
+            if response.status_code == 412:
+                self.args.is_risk = True
+                return
             response.raise_for_status()
             data = response.json().get("data", {})
             feeds = data.get("feeds")
@@ -428,24 +474,34 @@ class Crawler:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"返回解析错误 {e}") from e
 
-    def get_comics_details(self, comic_id_list):
+    def get_comics_details(self, comic_id_list: list, comics: list):
         """批量获取漫画详情"""
-        if self.args.workers == 1:
-            concurrent = False
-        else:
-            concurrent = True
         task_list = []
-        for comic_id in comic_id_list:
-            task_list.append(lambda comic_id=comic_id: self.get_comic_details(comic_id))
+        if comics:
+            for comic in comics:
+                if self.args.fill_blank and comic.get("last_ep_title"):
+                    return
+                task_list.append(lambda comic_id=comic["comic_id"]: self.get_comic_details(comic_id))
+        else:
+            for comic_id in comic_id_list:
+                task_list.append(lambda comic_id=comic_id: self.get_comic_details(comic_id))
         tr = TaskRunner(
+            self.args,
             task_list,
-            concurrent=concurrent,
-            max_workers=self.args.workers,
-            delay=self.args.delay,
             title="批量请求漫画详情"
         )
         tr.start()
-        return tr.results
+        if comics:
+            req_comics = {}
+            for item in tr.results:
+                req_comics[item.get("comic_id")] = item
+            for comic in comics:
+                comic_id = comic.get("comic_id")
+                if comic_id in req_comics:
+                    comic = req_comics[comic_id]
+        else:
+            comics = tr.results
+        return comics
 
     def get_classify_page_all(self):
         """获取全部分类页"""
@@ -464,7 +520,7 @@ class Crawler:
                     page_size=self.args.page_size,
                     page_num=page_num
                 )
-                if len(page) == 0:
+                if not page or len(page) == 0:
                     break
                 data += page
                 page_num += 1
@@ -476,10 +532,6 @@ class Crawler:
 
     def get_update_page_all(self):
         """批量获取更新推荐页"""
-        if self.args.workers == 1:
-            concurrent = False
-        else:
-            concurrent = True
         task_list = []
 
         start = datetime.strptime(self.args.sdate, "%Y-%m-%d")
@@ -489,10 +541,8 @@ class Crawler:
             task_list.append(lambda date=current.strftime("%Y-%m-%d"): self.get_update_page(date))
             current += timedelta(days=1)
         tr = TaskRunner(
+            self.args,
             task_list,
-            concurrent=concurrent,
-            max_workers=self.args.workers,
-            delay=self.args.delay,
             title="批量获取更新推荐页",
             unit="页"
         )
@@ -519,7 +569,7 @@ class Crawler:
                     page_size=self.args.page_size,
                     page_num=page_num
                 )
-                if len(page) == 0:
+                if not page or len(page) == 0:
                     break
                 data += page
                 page_num += 1
@@ -531,18 +581,14 @@ class Crawler:
 
     def get_comic_bonus_all(self, comics: list) -> dict:
         """批量获取漫画特典页"""
-        if self.args.workers == 1:
-            concurrent = False
-        else:
-            concurrent = True
         task_list = []
         for comic in comics:
+            if self.args.fill_blank and comic.get("bonus_total"):
+                continue
             task_list.append(lambda comic_id=comic.get("comic_id"): self.get_comic_bonus(comic_id))
         tr = TaskRunner(
+            self.args,
             task_list,
-            concurrent=concurrent,
-            max_workers=self.args.workers,
-            delay=self.args.delay,
             title="批量请求漫画特典",
             is_dict=True
         )
@@ -576,24 +622,23 @@ class Crawler:
 
 class TaskRunner:
     """任务类"""
-    def __init__(self, tasks, concurrent=False, delay=0,
-                 max_workers=4, retries=0, retry_delay=1,
+    def __init__(self, args, tasks, retries=0, retry_delay=1,
                  title="", unit="个", is_dict=False):
         """
+        :param args: 参数列表
         :param tasks: List[Any] 要处理的任务列表
         :param concurrent: bool 是否并发执行任务
-        :param delay: float 顺序模式下任务之间的延迟（毫秒）
-        :param max_workers: int 并发线程数
         :param retries: int 每个任务失败后的最大重试次数
         :param retry_delay: float 每次重试之间的等待时间（秒）
         :param title: str 展示的进度描述
         :param unit: str 进度单位
         :param is_dict: bool 是否按字典方式处理结果
         """
+        self.args = args
         self.tasks = tasks
-        self.concurrent = concurrent
-        self.delay = delay
-        self.max_workers = max_workers
+        self.concurrent = True if args.workers > 1 else False
+        self.delay = self.args.delay
+        self.max_workers = self.args.workers
         self.retries = retries
         self.retry_delay = retry_delay
         self.title = title
@@ -610,8 +655,8 @@ class TaskRunner:
             try:
                 result = task()
                 break
-            except Exception as e:
-                print(f"{e}")
+            except Exception:
+                print(f"多线程执行出现错误 {traceback.print_exc()}")
                 if attempt <= self.retries:
                     time.sleep(self.retry_delay / 1000)
         return result
@@ -624,6 +669,8 @@ class TaskRunner:
 
     def _run_sequential(self):
         for task in tqdm(self.tasks, desc=f"{self.title}中", unit=self.unit):
+            if self.args.is_risk:
+                return
             result = self._execute_task(task)
             with self._lock:
                 if result is not None:
@@ -638,6 +685,8 @@ class TaskRunner:
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_task = {executor.submit(self._execute_task, task): task for task in self.tasks}
             for future in tqdm(as_completed(future_to_task), total=len(self.tasks), desc=f"{self.title}中", unit=self.unit):
+                if self.args.is_risk:
+                    return
                 result = future.result()
                 with self._lock:
                     if result is not None:
@@ -651,12 +700,14 @@ class Document:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.type: str
+        self.field_ref = "A1:U1"
         self.field_map = {
             "comic_id": "ID",
             "title": "漫画名",
             "authors": "作者",
             "info": "更新信息",
             "is_finish": "状态",
+            "price": "收费",
             "total": "章节数",
             "bonus_total": "特典数",
             "last_ep_title": "最新章节标题",
@@ -674,7 +725,86 @@ class Document:
             "square_cover": "方形封面",
             "release_time": "上架时间",
         }
-        self.field_ref = "A1:U1"
+        self.field_map_classify = {
+            "comic_id": "ID",
+            "title": "漫画名",
+            "authors": "作者",
+            "info": "更新信息",
+            "is_finish": "状态",
+            "total": "章节数",
+            "introduction": "简介",
+            "styles": "风格",
+            "rd_tag": "标签",
+            "horizontal_covers": "横版封面",
+            "vertical_cover": "竖版封面",
+            "square_cover": "方形封面",
+            "release_time": "上架时间",
+        }
+        self.field_map_update = {
+            "comic_id": "ID",
+            "title": "漫画名",
+            "ep_id": "最新章节ID",
+            "ep_title": "最新章节名",
+            "short_title": "最新章节短名",
+            "comment_total": "评论数",
+            "allow_wait_free": "等免",
+            "styles": "风格",
+            "url": "横版封面",
+            "vertical_cover": "竖版封面",
+            "date": "更新日期",
+        }
+        self.field_map_ranking = {
+            "comic_id": "ID",
+            "title": "漫画名",
+            "rank": "本周排行",
+            "last_rank": "上周排行",
+            "authors": "作者",
+            "info": "更新信息",
+            "is_finish": "状态",
+            "total": "章节数",
+            "last_short_title": "最新章节短标题",
+            "fans": "追更人数",
+            "allow_wait_free": "等免",
+            "styles": "风格",
+            "tags": "标签",
+            "vertical_cover": "竖版封面",
+        }
+        self.field_map_home_feed = {
+            "comic_id": "ID",
+            "title": "漫画名",
+            "image": "封面",
+            "is_finish": "状态",
+            "lastest_short_title": "最新章节短标题",
+            "main_style_name": "风格",
+            "score": "评分",
+            "introduction": "简介",
+            "evaluate": "剧情梗概",
+        }
+        self.field_map_favorite = {
+            "comic_id": "ID",
+            "title": "漫画名",
+            "authors": "作者",
+            "info": "更新信息",
+            "is_finish": "状态",
+            "total": "章节数",
+            "last_ep_title": "最新章节短标题",
+            "last_ep_date": "最新章节更新日期",
+            "hcover": "横版封面",
+            "vcover": "竖版封面",
+            "scover": "方形封面",
+            "latest_read_time": "上次阅读时间",
+        }
+        self.field_map_buy = {
+            "comic_id": "ID",
+            "title": "漫画名",
+            "total": "章节数",
+            "bought_ep_count": "已购章节数",
+            "last_ep_title": "最新章节短标题",
+            "last_ep_date": "最新章节更新日期",
+            "hcover": "横版封面",
+            "vcover": "竖版封面",
+            "scover": "方形封面",
+        }
         if args.detail and args.bonus:
             pass
         elif args.detail:
@@ -685,116 +815,50 @@ class Document:
             self.field_map.pop("recently_lock_bonus_date")
             self.field_ref = "A1:P1"
         elif args.type == "classify":
-            self.field_map = {
-                "comic_id": "ID",
-                "title": "漫画名",
-                "authors": "作者",
-                "info": "更新信息",
-                "is_finish": "状态",
-                "total": "章节数",
-                "introduction": "简介",
-                "styles": "风格",
-                "rd_tag": "标签",
-                "horizontal_covers": "横版封面",
-                "vertical_cover": "竖版封面",
-                "square_cover": "方形封面",
-                "release_time": "上架时间",
-            }
+            self.field_map = self.field_map_classify
             self.field_ref = "A1:M1"
         elif args.type == "update":
-            self.field_map = {
-                "comic_id": "ID",
-                "title": "漫画名",
-                "ep_id": "最新章节ID",
-                "ep_title": "最新章节名",
-                "short_title": "最新章节短名",
-                "comment_total": "评论数",
-                "allow_wait_free": "等免",
-                "styles": "风格",
-                "url": "横版封面",
-                "vertical_cover": "竖版封面",
-                "date": "更新日期",
-            }
+            self.field_map = self.field_map_update
             self.field_ref = "A1:K1"
         elif args.type == "ranking":
-            self.field_map = {
-                "comic_id": "ID",
-                "title": "漫画名",
-                "rank": "本周排行",
-                "last_rank": "上周排行",
-                "authors": "作者",
-                "info": "更新信息",
-                "is_finish": "状态",
-                "last_short_title": "最新章节短标题",
-                "total": "章节数",
-                "fans": "追更人数",
-                "styles": "风格",
-                "tags": "标签",
-                "vertical_cover": "竖版封面",
-            }
+            self.field_map = self.field_map_ranking
             self.field_ref = "A1:M1"
         elif args.type == "home_feed":
-            self.field_map = {
-                "comic_id": "ID",
-                "title": "漫画名",
-                "image": "封面",
-                "is_finish": "状态",
-                "lastest_short_title": "最新章节短标题",
-                "main_style_name": "风格",
-                "score": "评分",
-                "introduction": "简介",
-                "evaluate": "剧情梗概",
-            }
+            self.field_map = self.field_map_home_feed
             self.field_ref = "A1:I1"
         elif args.type == "favorite":
-            self.field_map = {
-                "comic_id": "ID",
-                "title": "漫画名",
-                "authors": "作者",
-                "info": "更新信息",
-                "is_finish": "状态",
-                "total": "章节数",
-                "last_ep_title": "最新章节短标题",
-                "last_ep_date": "最新章节更新日期",
-                "hcover": "横版封面",
-                "vcover": "竖版封面",
-                "scover": "方形封面",
-                "latest_read_time": "上次阅读时间",
-            }
+            self.field_map = self.field_map_favorite
             self.field_ref = "A1:L1"
         elif args.type == "buy":
-            self.field_map = {
-                "comic_id": "ID",
-                "title": "漫画名",
-                "total": "章节数",
-                "bought_ep_count": "已购章节数",
-                "last_ep_title": "最新章节短标题",
-                "last_ep_date": "最新章节更新日期",
-                "hcover": "横版封面",
-                "vcover": "竖版封面",
-                "scover": "方形封面",
-            }
+            self.field_map = self.field_map_buy
             self.field_ref = "A1:I1"
 
     def load(self) -> list:
         """载入数据"""
         data: str
         ext = os.path.splitext(self.args.input)[-1].lower()
+        field_dict = {v: k for k, v in self.field_map.items()}
         if ext == '.json':
             with open(self.args.input, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         elif ext == '.csv':
+            data = []
             with open(self.args.input, 'r', encoding='utf-8') as f:
-                data = list(csv.DictReader(f))
-                for item in data:
-                    item["comic_id"] = item["ID"]
+                reader = csv.DictReader(f)
+                headers = [field_dict.get(h, h) for h in next(reader)]
+                for row in reader:
+                    row_dict = dict(zip(headers, ["" if cell is None else cell for cell in row]))
+                    data.append(row_dict)
         elif ext == '.xlsx':
             wb = load_workbook(self.args.input)
             ws = wb.active
-            rows = list(ws.iter_rows(values_only=True))
-            data = [dict(zip(rows[0], row)) for row in rows[1:]]
-            for item in data:
-                item["comic_id"] = item["ID"]
+            
+            headers_zh = [cell.value for cell in ws[1]]
+            headers = [field_dict.get(h, h) for h in headers_zh]
+            data = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                row_dict = dict(zip(headers, ["" if cell is None else cell for cell in row]))
+                data.append(row_dict)
         else:
             raise ValueError(f"{Fore.RED}仅支持json、csv、xlsx格式的导入读取{Fore.RESET}")
         return data
@@ -836,12 +900,13 @@ class Document:
         """处理输出字段"""
         value = row.get(field, "")
         if field == "is_finish":
-            value = {0: "连载中", 1: "已完结"}.get(value, value)
+            value = {-1: "预更新", 0: "连载中", 1: "已完结"}.get(value, value)
         elif field == "info" and not value:
             total = row.get("total")
-            if not total:
+            is_finish = row.get("is_finish")
+            if not total or is_finish == -1:
                 value = ""
-            elif row.get("is_finish"):
+            elif is_finish == 1:
                 value = f"[已完结]共{total}话"
             else:
                 value = f"[连载中]至{total}话"
@@ -853,18 +918,18 @@ class Document:
             elif row.get("author"):
                 value = ",".join(row.get("author"))
         elif field == "styles":
-            if len(value) == 0:
+            if not value or len(value) == 0:
                 value = ""
-            elif isinstance(value[0], str):
+            elif value and isinstance(value, list):
                 value = ",".join(value)
-            else:
+            elif value and isinstance(value, dict):
                 value = ",".join([i.get("name", "") for i in value])
         elif field == "tags":
-            if len(value) == 0:
+            if not value or len(value) == 0:
                 value = ""
-            elif isinstance(value[0], str):
+            elif value and isinstance(value, list):
                 value = ",".join(value)
-            else:
+            elif value and isinstance(value, dict):
                 value = ",".join([i.get("name", "") for i in value])
         elif field == "horizontal_covers":
             if value and isinstance(value, list):
@@ -873,7 +938,7 @@ class Document:
                 value = row.get("horizontal_cover")
         elif field == "allow_wait_free":
             value = "是" if value else "否"
-        return value
+        return str(value)
 
     def xlsx(self, data: dict):
         """保存为xlsx"""
@@ -940,21 +1005,29 @@ def run_gui():
     root.title("哔哩哔哩漫画元数据请求器")
     root.iconbitmap(get_res_path("BiliBili_favicon.ico"))
     root.geometry("360x100")
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = (screen_width - 360) // 2
+    y = (screen_height - 100) // 2
+    root.geometry(f"{360}x{100}+{x}+{y}")
     label = tk.Label(root, text="请使用CLI模式, GUI模式开发中...ο(=•ω＜=)ρ⌒☆")
     label.pack(pady=20, padx=20)
     root.mainloop()
 
 def run_cli(args: argparse.Namespace, cl: Crawler, dm: Document):
     """CLI 模式"""
+    comics: list
     cl.get_parameter()
     if args.parameter:
         print(cl.parse_parameter())
     if args.input:
-        args.id = [item['comic_id'] for item in dm.load()]
+        comics = dm.load()
+        args.id = [comic['comic_id'] for comic in comics]
         if cl.confirm():
-            comics = cl.get_comics_details(args.id)
-            dm.save(comics)
-            tqdm.write(f"{Fore.GREEN}自定义漫画ID数据保存成功, 共{len(comics)}本漫画{Fore.RESET}")
+            if args.detail or not args.bonus:
+                comics = cl.get_comics_details(comics=comics)
+                dm.save(comics)
+                tqdm.write(f"{Fore.GREEN}自定义漫画ID数据保存成功, 共{len(comics)}本漫画{Fore.RESET}")
     elif args.id:
         if cl.confirm():
             comics = cl.get_comics_details(args.id)
@@ -1008,6 +1081,9 @@ def run_cli(args: argparse.Namespace, cl: Crawler, dm: Document):
         if cl.get_comic_bonus_all(comics):
             dm.save(comics)
             tqdm.write(f"{Fore.GREEN}特典数据保存成功{Fore.RESET}")
+
+    if args.is_risk:
+        print(f"{Fore.YELLOW}412请求频繁, IP已触发限频, 请稍后再尝试请求...{Fore.RESET}")
 
 if __name__ == "__main__":
     if is_launched_by_explorer():

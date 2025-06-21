@@ -1,0 +1,1 @@
+Use ./bmmc.exe -h
