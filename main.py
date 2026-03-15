@@ -336,14 +336,19 @@ class Crawler:
                 comic["price"] = "付费(可漫读券)"
             elif comic.get("pay_mode") == 2:
                 comic["price"] = "付费"
-            if comic.get("ep_list"):
-                last_episode = comic.get("ep_list")[0]
+            ep_list = comic.get("ep_list")
+            if ep_list:
+                last_episode = ep_list[0]
                 comic["last_ep_id"] = last_episode["id"]
-                comic["last_ep_cover"] = last_episode["cover"]
                 comic["last_ep_title"] = f"{last_episode["short_title"]} {last_episode["title"]}"
                 comic["last_ep_date"] = last_episode["pub_time"].split(" ")[0]
+                ep_list.sort(key=lambda x: datetime.fromisoformat(x["index_last_modified"]))
+                last_modify_episode = ep_list[-1]
+                comic["last_modify_ep_id"] = last_modify_episode["id"]
+                comic["last_modify_ep_title"] = f"{last_modify_episode["short_title"]} {last_modify_episode["title"]}"
+                comic["last_modify_ep_date"] = last_modify_episode["index_last_modified"].split(" ")[0]
                 if comic["release_time"] == "":
-                    comic["release_time"] = comic.get("ep_list")[-1]["pub_time"].split(" ")[0]
+                    comic["release_time"] = ep_list[-1]["pub_time"].split(" ")[0]
                 else:
                     comic["release_time"] = comic["release_time"].replace(".","-")
             return comic
@@ -474,13 +479,13 @@ class Crawler:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"返回解析错误 {e}") from e
 
-    def get_comics_details(self, comic_id_list: list, comics: list):
+    def get_comics_details(self, comic_id_list: list=None, comics: list=None):
         """批量获取漫画详情"""
         task_list = []
         if comics:
             for comic in comics:
                 if self.args.fill_blank and comic.get("last_ep_title"):
-                    return
+                    continue
                 task_list.append(lambda comic_id=comic["comic_id"]: self.get_comic_details(comic_id))
         else:
             for comic_id in comic_id_list:
@@ -497,8 +502,8 @@ class Crawler:
                 req_comics[item.get("comic_id")] = item
             for comic in comics:
                 comic_id = comic.get("comic_id")
-                if comic_id in req_comics:
-                    comic = req_comics[comic_id]
+                if int(comic_id) in req_comics:
+                    comic.update(req_comics[int(comic_id)])
         else:
             comics = tr.results
         return comics
@@ -527,6 +532,8 @@ class Crawler:
                 process_bar.update(1)
                 if self.args.page_num:
                     break
+                if self.args.delay > 0:
+                    time.sleep(self.args.delay / 1000)
         tqdm.write(f"{Fore.GREEN}加载完毕, 共{len(data)}本漫画{Fore.RESET}")
         return data
 
@@ -576,6 +583,8 @@ class Crawler:
                 process_bar.update(1)
                 if self.args.page_num:
                     break
+                if self.args.delay > 0:
+                    time.sleep(self.args.delay / 1000)
         tqdm.write(f"{Fore.GREEN}主页信息流加载完毕, 共{len(data)}本漫画{Fore.RESET}")
         return data
 
@@ -656,7 +665,7 @@ class TaskRunner:
                 result = task()
                 break
             except Exception:
-                print(f"多线程执行出现错误 {traceback.print_exc()}")
+                print(f"多线程执行出现错误 {traceback.format_exc()}")
                 if attempt <= self.retries:
                     time.sleep(self.retry_delay / 1000)
         return result
@@ -712,6 +721,8 @@ class Document:
             "bonus_total": "特典数",
             "last_ep_title": "最新章节标题",
             "last_ep_date": "最新章节更新日期",
+            "last_modify_ep_title": "最后修改章节标题",
+            "last_modify_ep_date": "最后修改章节更新日期",
             "last_bonus_title": "最新特典标题",
             "last_bonus_date": "最新特典日期",
             "recently_lock_bonus_title": "最近下架特典标题",
@@ -845,10 +856,14 @@ class Document:
             data = []
             with open(self.args.input, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
-                headers = [field_dict.get(h, h) for h in next(reader)]
+                field_mapping = {v: k for k, v in self.field_map.items()}
+                data = []
                 for row in reader:
-                    row_dict = dict(zip(headers, ["" if cell is None else cell for cell in row]))
-                    data.append(row_dict)
+                    new_row = {}
+                    for ch_key, value in row.items():
+                        eng_key = field_mapping.get(ch_key, ch_key)
+                        new_row[eng_key] = "" if value is None else value
+                    data.append(new_row)
         elif ext == '.xlsx':
             wb = load_workbook(self.args.input)
             ws = wb.active
@@ -927,10 +942,10 @@ class Document:
         elif field == "tags":
             if not value or len(value) == 0:
                 value = ""
+            elif value and isinstance(value[0], dict):
+                value = ",".join([i.get("name", "") for i in value])
             elif value and isinstance(value, list):
                 value = ",".join(value)
-            elif value and isinstance(value, dict):
-                value = ",".join([i.get("name", "") for i in value])
         elif field == "horizontal_covers":
             if value and isinstance(value, list):
                 value = ",".join(value)
@@ -1016,7 +1031,7 @@ def run_gui():
 
 def run_cli(args: argparse.Namespace, cl: Crawler, dm: Document):
     """CLI 模式"""
-    comics: list
+    comics: list = []
     cl.get_parameter()
     if args.parameter:
         print(cl.parse_parameter())
@@ -1042,7 +1057,7 @@ def run_cli(args: argparse.Namespace, cl: Crawler, dm: Document):
         if cl.confirm():
             page = cl.get_ranking_page(args.rank)
             comic_id_list = [i.get("comic_id") for i in page.get("rankListInfo")]
-            comics = cl.get_ranking_page(comic_id_list).get("rankListInfo", {})
+            comics = cl.get_ranking_page(comic_id_list).get("rankListInfo", [])
             for index, comic in enumerate(comics):
                 comic["rank"] = index + 1
             dm.save(comics)
@@ -1070,6 +1085,9 @@ def run_cli(args: argparse.Namespace, cl: Crawler, dm: Document):
             comics = cl.get_buy_comics()
             dm.save(comics)
             tqdm.write(f"{Fore.GREEN}[已购漫画]数据保存成功, 共{len(comics)}本漫画{Fore.RESET}")
+
+    if  len(comics) == 0:
+        return
 
     if not args.id and args.detail:
         args.id = [comic['comic_id'] for comic in comics]
